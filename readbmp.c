@@ -343,7 +343,7 @@ void show_info(char *prog_name) {
 	printf(RST_SCRN_ATTS);  // backs to original screen attributes
 	printf(" - Reading Temperature and Pressure from a Bosch BMP085 on Linux\n");
 	printf("==========================================================================\n");
-	printf("Ver. 1.0 (Sep-2015) - Cleber Jean Barranco Roman (cleberjean@hotmail.com)\n");
+	printf("Ver. 1.0 (22-Sep-2015) - Cleber Jean Barranco (cleberjean@hotmail.com)\n");
 	show_help(prog_name);
 }
 

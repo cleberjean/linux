@@ -1,7 +1,7 @@
 /*******************************************************************************
    readbmp - Reading the Temperature and Pressure from a Bosch BMP085 on Linux
    ===========================================================================
-   Version 1.0 (22-Sep-2015) - Cleber Jean Barranco (cleberjean@hotmail.com)
+   Version 1.1 (26-Sep-2015) - Cleber Jean Barranco (cleberjean@hotmail.com)
 
    This code will read the temperature and pressure from BMP085 connected on
    the VGA port (pins 5 = GND, 9 = +5 Vcc, 12 = SDA and 15 = SCL) to every 1
@@ -24,13 +24,13 @@
           A = SDA
 
 
-   Based on original code for Raspberry PI in:
+   Based on original Jesse Brannon's code for Raspberry PI in:
    https://github.com/brannojs/ECE497/blob/master/MiniProject02/pressurei2c.c
 
    * Uses ANSI Escape Sequences to print colorful characters on screen.
 
-   Compile it with "$ gcc -o readbmp readbmp.c -lm [-Wall]"
-   or "$ auto-apt run gcc -o readbmp readbmp.c -lm [-Wall]"
+   Compile it with "$ gcc -o readbmp readbmp.c -lm"
+   or "sudo auto-apt run gcc -o readbmp readbmp.c -lm"
 
    Others Referencies:
        https://github.com/brannojs/ECE497/blob/master/MiniProject02/pressurei2c.c
@@ -44,16 +44,23 @@
        https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
        http://www.codingunit.com/c-reference-stdlib-h-function-getenv
        http://stackoverflow.com/questions/9753346/determine-if-a-c-string-is-a-valid-int-in-c
+       http://www.csl.mtu.edu/cs4411.choi/www/Resource/signal.pdf
        https://en.wikipedia.org/wiki/Unix_signal
        https://en.wikipedia.org/wiki/C_signal_handling
        http://en.cppreference.com/w/c/program/signal
+       http://www.gnu.org/software/libc/manual/html_node/Termination-in-Handler.html#Termination-in-Handler
+
+   I hope which this code will be util.
 
    Stuffs still to do:
        Optimize code and functions.
 
+   P.S.: I don't know if the explanations are clear because I don't speak english.
+
 *******************************************************************************/
 
-// Necessary libraries
+/*** Libraries declarations ***/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,26 +68,42 @@
 #include <unistd.h>
 #include <fcntl.h>
 //#include <poll.h>           // ?
-#include <math.h>           // to calculate sea level pressure (pow())
-#include <signal.h>         // to handle CTRL+C
-#include <termios.h>        // to perform no echo into terminal
+#include <math.h>           // to calculate sea level pressure (pow() function)
+#include <signal.h>         // to handle CTRL+C and kill command
+#include <termios.h>        // to perform "no echo" from keyboard into terminal
 //#include <linux/version.h>  // to check kernel version (not yet implemented)
 //#include <sys/utsname.h>    // to check kernel version (not yet implemented)
 
-#define MAX_BUF 64
+/*** Libraries declarations end ***/
+
+
+#define MAX_BUF 64          // code's original constant (not changed)
+
 
 // Define bool type in standard C (C++ don't needs)
 #ifndef __cplusplus
 enum boolean {true = 1, false = 0};
-typedef enum boolean bool;
+typedef enum boolean bool;  // now has bool type on standard C
 #endif
 
-// Global vars (useds by various functions)
-bool ctrlc_press = false;   // informs if CRTL+C was pressed to the program loop
 
-// Escape Sequences - Foreground Colours
-// See details in https://en.wikipedia.org/wiki/ANSI_escape_code#Colors or
-// (better) http://bitmote.com/index.php?post/2012/11/19/Using-ANSI-Color-Codes-to-Colorize-Your-Bash-Prompt-on-Linux
+/*** Global vars (useds by several functions) ***/
+
+bool ctrlc_press = false;   // informs if CRTL+C was pressed to the program loop
+int i2cbus = 1;             // default i2c bus number
+
+// Keyboard echo control
+struct termios org_term, new_term;
+int oldf;
+
+/*** Global vars end ***/
+
+
+/*** Escape Sequences - Foreground Colours ***/
+/* See details in https://en.wikipedia.org/wiki/ANSI_escape_code#Colors or
+   (better) http://bitmote.com/index.php?post/2012/11/19/Using-ANSI-Color-Codes-to-Colorize-Your-Bash-Prompt-on-Linux
+*/
+
 #define BLACK           "\033[0;30m"
 #define RED             "\033[0;31m"
 #define GREEN           "\033[0;32m"
@@ -100,23 +123,27 @@ bool ctrlc_press = false;   // informs if CRTL+C was pressed to the program loop
 
 #define RST_SCRN_ATTS   "\033[m"      // resets screen colours attributes
 
-// Functions prototypes
+/*** Escape sequences end ***/
+
+
+/*** Functions prototypes ***/
+
 void show_help(char *prog_name);
 void show_info(char *prog_name);
 bool isroot(void);
 bool key_pressed(void);
 float getSLP(int Altitude, float absPressure);
-bool close_bmp085(int i2cbus);
-void ctrlc_handler(int sig);
+bool close_bmp085();
+void signal_handler(int sig);
+void disable_echo(void);
+void restore_echo(void);
+
+/*** Prototypes functions end ***/
+
 
 int main(int argc, char **argv) {
 	int LocalAltitude = 9999;   // local altitude to compute sea level pressure
 	bool noloop = false;        // program loop flag
-	int i2cbus = 1;             // default i2c bus number
-
-	// Keyboard echo control
-	struct termios org_term, new_term;
-	int oldf;
 
 	printf("\n");  // jumps 1 row (duh!)
 
@@ -141,8 +168,8 @@ int main(int argc, char **argv) {
 				} else {
 					printf("Option '-alt' without altitude!\n\n");
 					return 1;
-				}
-			}
+				}  // if (argv[++i] != NULL) {...} else {...}
+			}      // if (strcmp(argv[i], "-alt") == 0) {...}
 
 			// Checks if -i2c option is present
 			if (strcmp(argv[i], "-i2c") == 0) {
@@ -158,8 +185,8 @@ int main(int argc, char **argv) {
 				} else {
 					printf("Option '-i2c' without bus number!\n\n");
 					return 1;
-				}
-			}
+				}  // if (argv[++i] != NULL) {...} else {...}
+			}      // if (strcmp(argv[i], "-i2c") == 0) {...}
 
 			// Checks if -nl or --noloop option is present
 			if ((strcmp(argv[i], "-nl") == 0) || (strcmp(argv[i], "--noloop") == 0)) {
@@ -182,8 +209,8 @@ int main(int argc, char **argv) {
 				show_help(argv[0]);
 				return 1;
 			}
-		}      // for (i = 1; i < argc; i++)
-	}          // if (argc > 1)
+		}      // for (i = 1; i < argc; i++) {...}
+	}          // if (argc > 1) {...}
 
 	// User is root?
 	if (!isroot()) {
@@ -191,16 +218,11 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	// Traps CTRL+C
-	signal(SIGINT, ctrlc_handler);  // call sigint_handle function if CTRL+C/CTRL+D is pressed (don't work for the kill command!)
+	// Traps CTRL+C, kill command
+	signal(SIGINT, signal_handler);  // call signal_handler function if CTRL+C/CTRL+D is pressed
+	signal(SIGTERM, signal_handler); // call signal_handler function if kill, killall commands are invocateds (except kill -9 which not be intercepted)
 
-	// Disabling terminal's keyboard echo
-	tcgetattr(STDIN_FILENO, &org_term);           // gets original terminal attributes
-	new_term = org_term;                          // copies to new attributes struct 
-	new_term.c_lflag &= ~(ICANON | ECHO);	      // clear ICANON and ECHO
-	tcsetattr(STDIN_FILENO, TCSANOW, &new_term);  // sets the new terminal attributes
-	oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
-	fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+	disable_echo();
 
 	FILE *fp;
 	char path[MAX_BUF];
@@ -225,9 +247,7 @@ int main(int argc, char **argv) {
 			printf(BRIGHT_RED);    // error message written in red
 			printf("\aDevice opening failed!\n\n");
 			printf(RST_SCRN_ATTS); // backs to original screen colors attributes
-			// Restores keyboard echo
-			tcsetattr(STDIN_FILENO, TCSANOW, &org_term);
-			fcntl(STDIN_FILENO, F_SETFL, oldf);
+			restore_echo();        // restores keyboard echo
 			return 1;
 		}
 	}
@@ -243,14 +263,12 @@ int main(int argc, char **argv) {
 		// Attempts to open the file of the device.
 		snprintf(path, sizeof path, "/sys/bus/i2c/drivers/bmp085/%d-0077/temp0_input", i2cbus);
 		if ((fp = fopen(path, "r")) == NULL) {
-			if (close_bmp085(i2cbus)) {
+			if (close_bmp085()) {
 				printf(BRIGHT_RED);    // error message written in red
 				printf("\aCouldn't open temperature file or file not found! BMP085 is installed?\n\n");
 				printf(RST_SCRN_ATTS); // backs to original screen colors attributes
 			}
-			// Restores keyboard echo
-			tcsetattr(STDIN_FILENO, TCSANOW, &org_term);
-			fcntl(STDIN_FILENO, F_SETFL, oldf);
+			restore_echo();  // restores keyboard echo
 			return 1;
 		}
 
@@ -272,14 +290,12 @@ int main(int argc, char **argv) {
 		// Attempts to open the file of the device.
 		snprintf(path, sizeof path, "/sys/bus/i2c/drivers/bmp085/%d-0077/pressure0_input", i2cbus);
 		if ((fp = fopen(path, "r")) == NULL) {
-			if (close_bmp085(i2cbus)) {
+			if (close_bmp085()) {
 				printf(BRIGHT_RED);    // error message written in red
 				printf("\aCouldn't open pressure file or file not found! BMP085 is installed?\n\n");
 				printf(RST_SCRN_ATTS); // backs to original screen colors attributes
 			}
-			// Restores keyboard echo
-			tcsetattr(STDIN_FILENO, TCSANOW, &org_term);
-			fcntl(STDIN_FILENO, F_SETFL, oldf);
+			restore_echo();  // restores keyboard echo
 			return 1;
 		}
 
@@ -306,18 +322,16 @@ int main(int argc, char **argv) {
 		printf("\n");
 	} while (!key_pressed() && !noloop && !ctrlc_press);
 
-	// Restores keyboard echo
-	tcsetattr(STDIN_FILENO, TCSANOW, &org_term);
-	fcntl(STDIN_FILENO, F_SETFL, oldf);
+	restore_echo();  // restores keyboard echo
 
 	//Close file of BMP085 located at I2C bus
 	printf(BRIGHT_WHITE);
 	printf("Disconnecting BMP085 (0x77) from I2C bus... ");
-	if (!close_bmp085(i2cbus)) return 1;
+	if (!close_bmp085()) return 1;
 	printf("Ok.\n\n");
 	printf(RST_SCRN_ATTS);  // backs to original screen colors attributes
 	return 0;
-}  // end main
+}  // main function end
 
 
 /*****************************************
@@ -342,8 +356,8 @@ void show_info(char *prog_name) {
 	printf("readbmp");
 	printf(RST_SCRN_ATTS);  // backs to original screen attributes
 	printf(" - Reading Temperature and Pressure from a Bosch BMP085 on Linux\n");
-	printf("==========================================================================\n");
-	printf("Ver. 1.0 (22-Sep-2015) - Cleber Jean Barranco (cleberjean@hotmail.com)\n");
+	printf("=========================================================================\n");
+	printf("Ver. 1.1 (26-Sep-2015) - Cleber Jean Barranco (cleberjean@hotmail.com)\n");
 	show_help(prog_name);
 }
 
@@ -384,11 +398,11 @@ float getSLP(int Altitude, float absPressure) {
 /**************************************************************
   Release BMP from bus and return true if ok else return false
  **************************************************************/
-bool close_bmp085(int bus) {
+bool close_bmp085() {
 	FILE *fp;
 	char path[MAX_BUF];
 
-	snprintf(path, sizeof path, "/sys/class/i2c-adapter/i2c-%d/delete_device", bus);
+	snprintf(path, sizeof path, "/sys/class/i2c-adapter/i2c-%d/delete_device", i2cbus);
 	if ((fp = fopen(path, "w")) == NULL) {
 		printf(BRIGHT_RED);    // error message written in red
 		printf("\n\aCouldn't disconnect the device from I2C bus!\n\n");
@@ -404,9 +418,56 @@ bool close_bmp085(int bus) {
 }
 
 
-/*********************************************************
-  Handle CTRL+C press (don't works for the kill command!)
- *********************************************************/
-void ctrlc_handler(int sig) {
-	ctrlc_press = true;
+/*****************************************************
+  Handles Control Signals (CTRL+C, kill, killall,...)
+ *****************************************************/
+void signal_handler(int sig) {
+	if (sig == SIGTERM) {
+		printf(BRIGHT_YELLOW);     // error message written in yellow
+		printf("\nKill signal received!\n");
+		printf(BRIGHT_WHITE);      // error message written in white
+		printf("\nTrying to finish pending actions... ");
+		restore_echo();            // restores keyboard echo
+		if (close_bmp085()) {
+			printf("Ok.\n");
+			printf(RST_SCRN_ATTS); // original screen colors attributes
+			printf("\n");          // backs to original screen colors attributes (here, don't backs without it and I don't know why!)
+		}
+
+		/* http://www.gnu.org/software/libc/manual/html_node/Termination-in-Handler.html#Termination-in-Handler
+		   "Now reraise the signal. We reactivate the signal’s default handling,
+		    which is to terminate the process.
+		    We could just call exit or abort, but reraising the signal sets the
+		    return status from the process correctly."
+		*/
+		signal(sig, SIG_DFL);
+		raise(sig);
+	}  // kill end
+		
+	if (sig == SIGINT) {
+//		signal(sig, SIG_IGN); // suggestion from http://www.csl.mtu.edu/cs4411.choi/www/Resource/signal.pdf
+		ctrlc_press = true;
+	}
+}
+
+
+/**********************************
+  Disable terminal's keyboard echo
+ **********************************/
+void disable_echo(void) {
+	tcgetattr(STDIN_FILENO, &org_term);           // gets original terminal attributes
+	new_term = org_term;                          // copies to new attributes struct 
+	new_term.c_lflag &= ~(ICANON | ECHO);	      // clear ICANON and ECHO
+	tcsetattr(STDIN_FILENO, TCSANOW, &new_term);  // sets the new terminal attributes
+	oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+	fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+}
+
+
+/***********************************
+  Restores terminal's keyboard echo
+ ***********************************/
+void restore_echo(void) {
+	tcsetattr(STDIN_FILENO, TCSANOW, &org_term);
+	fcntl(STDIN_FILENO, F_SETFL, oldf);
 }
